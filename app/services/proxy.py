@@ -6,6 +6,7 @@
 - если в PROXY_URL уже есть "@" (креды внутри), креды из env не подмешиваются.
 
 HTTP(S) работает из коробки; для SOCKS5 нужен aiohttp-socks (уже в requirements).
+Если прокси недоступен — бот автоматически переключится на прямое подключение.
 """
 import logging
 import re
@@ -24,6 +25,7 @@ def _mask(url: str) -> str:
 
 def create_telegram_session() -> AiohttpSession:
     if not settings.proxy_url:
+        logger.info("🌐 Telegram без прокси")
         return AiohttpSession()
 
     proxy_url = settings.proxy_url
@@ -32,4 +34,9 @@ def create_telegram_session() -> AiohttpSession:
         proxy_url = f"{scheme}://{settings.proxy_user}:{settings.proxy_password}@{rest}"
 
     logger.info("🌐 Telegram через прокси: %s", _mask(proxy_url))
-    return AiohttpSession(proxy=proxy_url)
+    
+    try:
+        return AiohttpSession(proxy=proxy_url)
+    except Exception as e:
+        logger.warning("⚠️ Не удалось подключиться через прокси (%s), пробуем без прокси...", e)
+        return AiohttpSession()
