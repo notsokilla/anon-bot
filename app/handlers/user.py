@@ -291,3 +291,18 @@ async def back_to_start(cq: types.CallbackQuery):
         f"Привет, {cq.from_user.first_name}!\nВыбери действие:",
         reply_markup=builder.as_markup()
     )
+
+@router.callback_query(F.data.startswith("copy_link_"))
+async def copy_link_handler(cq: types.CallbackQuery):
+    bot_username = (await cq.bot.get_me()).username
+    user_id = cq.from_user.id
+    link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    await cq.message.answer(
+        f"📋 <b>Ваша ссылка для копирования:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        "Нажмите на ссылку выше чтобы скопировать её!",
+        parse_mode="HTML"
+    )
+    await cq.answer("Ссылка отправлена!", show_alert=False)
+

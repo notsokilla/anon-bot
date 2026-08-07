@@ -228,3 +228,6 @@ async def delete_broadcast_template(tmpl_id: int):
             await session.commit()
             return True
         return False
+async def get_broadcast_template_by_id(tmpl_id: int):
+    async with async_session_maker() as session:
+        return await session.get(BroadcastTemplate, tmpl_id)

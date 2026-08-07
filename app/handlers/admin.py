@@ -278,3 +278,104 @@ async def tmpl_finish(cq: types.CallbackQuery, state: FSMContext):
     # Небольшая задержка перед возвратом в меню, чтобы пользователь увидел сообщение
     await asyncio.sleep(1)
     await templates_menu(cq)
+# --- Template Edit Handler ---
+@router.callback_query(F.data.startswith("tmpl_edit_"))
+async def tmpl_edit(cq: types.CallbackQuery, state: FSMContext):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    tmpl_id = int(cq.data.split("_")[-1])
+    tmpl = await get_broadcast_template_by_id(tmpl_id)
+    
+    if not tmpl:
+        return await cq.answer("Шаблон не найден", show_alert=True)
+    
+    status = "🟢 ВКЛ" if tmpl.use_in_auto else "🔴 ВЫКЛ"
+    btn_info = f"🔘 Кнопка: {tmpl.button_text} -> {tmpl.button_url}" if tmpl.has_button else "❌ Без кнопки"
+    
+    text = (
+        f"📋 <b>Редактирование шаблона #{tmpl.id}</b>\n\n"
+        f"Текст:\n{tmpl.text}\n\n"
+        f"{status} авто-рассылку\n"
+        f"{btn_info}\n\n"
+        f"Создан: {tmpl.created_at.strftime('%d.%m.%Y %H:%M')}"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Переключить авто-рассылку", callback_data=f"tmpl_toggle_auto_{tmpl.id}")
+    builder.button(text="✏️ Изменить текст", callback_data=f"tmpl_change_text_{tmpl.id}")
+    builder.button(text="🗑 Удалить шаблон", callback_data=f"tmpl_delete_{tmpl.id}")
+    builder.button(text="⬅️ Назад", callback_data="admin_templates")
+    builder.adjust(1, 1, 1, 1)
+    
+    await cq.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+
+@router.callback_query(F.data.startswith("tmpl_toggle_auto_"))
+async def tmpl_toggle_auto(cq: types.CallbackQuery):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    tmpl_id = int(cq.data.split("_")[-1])
+    tmpl = await get_broadcast_template_by_id(tmpl_id)
+    
+    if tmpl:
+        await update_broadcast_template(tmpl_id, use_in_auto=not tmpl.use_in_auto)
+        await cq.answer(f"Авто-рассылка {'включена' if not tmpl.use_in_auto else 'выключена'}", show_alert=True)
+        await tmpl_edit(cq, None)  # Refresh the view
+
+@router.callback_query(F.data.startswith("tmpl_delete_"))
+async def tmpl_delete_confirm(cq: types.CallbackQuery):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    tmpl_id = int(cq.data.split("_")[-1])
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"tmpl_delete_yes_{tmpl_id}")
+    builder.button(text="❌ Отмена", callback_data=f"tmpl_edit_{tmpl_id}")
+    builder.adjust(1, 1)
+    
+    await cq.message.edit_text("Вы уверены что хотите удалить этот шаблон?", reply_markup=builder.as_markup())
+
+@router.callback_query(F.data.startswith("tmpl_delete_yes_"))
+async def tmpl_delete_yes(cq: types.CallbackQuery):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    tmpl_id = int(cq.data.split("_")[-1])
+    await delete_broadcast_template(tmpl_id)
+    await cq.message.edit_text("✅ Шаблон удален")
+    await asyncio.sleep(1)
+    await templates_menu(cq)
+
+@router.callback_query(F.data.startswith("tmpl_change_text_"))
+async def tmpl_change_text_start(cq: types.CallbackQuery, state: FSMContext):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    tmpl_id = int(cq.data.split("_")[-1])
+    await state.update_data(editing_tmpl_id=tmpl_id)
+    await state.set_state(TemplateStates.wait_edit_text)
+    await cq.message.edit_text("Отправьте новый текст для шаблона:")
+
+@router.message(TemplateStates.wait_edit_text)
+async def tmpl_save_new_text(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    tmpl_id = data.get('editing_tmpl_id')
+    
+    if tmpl_id:
+        await update_broadcast_template(tmpl_id, text=message.text)
+        await message.answer("✅ Текст обновлен!")
+        await state.clear()
+        
+        # Return to templates menu
+        from aiogram.types import CallbackQuery
+        # Can't directly call templates_menu, so just inform user
+    else:
+        await message.answer("❌ Ошибка: ID шаблона не найден")
+        await state.clear()
+
+@router.callback_query(F.data == "admin_logout")
+async def admin_logout(cq: types.CallbackQuery):
+    await invalidate_admin_session(cq.from_user.id)
+    await cq.message.edit_text("✅ Вы вышли из админ-панели.")
