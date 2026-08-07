@@ -3,10 +3,21 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 from datetime import datetime, timedelta
 import uuid
+import os
+from pathlib import Path
 from .models import Base, User, AnonymousMessage, PendingMessage, AdminSession, BroadcastTemplate
 from .config import settings
 
-engine = create_async_engine(settings.database_url, echo=False)
+# Определяем базовую директорию проекта
+BASE_DIR = Path(__file__).parent.parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+# Формируем правильный путь к базе данных
+db_path = DATA_DIR / "bot.db"
+database_url = f"sqlite+aiosqlite:///{db_path}"
+
+engine = create_async_engine(database_url, echo=False)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 async def init_db():
