@@ -1,6 +1,28 @@
+```
+# Environment
 .env
-data/
-venv/
-__pycache__/
-*.pyc
+.env.local
+*.env.*
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Editors
+.vscode/
 .idea/
+
+# Dependencies
+.venv/
+venv/
+node_modules/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+
+# Build artifacts
+dist/
+build/
+target/
+```

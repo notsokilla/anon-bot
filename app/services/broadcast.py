@@ -7,11 +7,10 @@ from ..models import AnonMessage, User
 
 
 async def send_broadcast(bot, text: str) -> int:
-    """Ручная рассылка админа — всегда с подписью служебного уведомления."""
-    body = "📣 <b>Служебное уведомление</b>\n\n" + text
+    """Ручная рассылка админа — без префикса."""
     async with Session() as s:
         ids = (await s.execute(select(User.id))).scalars().all()
-    return await _fanout(bot, ids, body)
+    return await _fanout(bot, ids, text)
 
 
 async def send_unread_reminders(bot) -> int:
