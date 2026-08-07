@@ -18,7 +18,6 @@ class User(Base):
     # Связи
     sent_messages = relationship("AnonymousMessage", foreign_keys="AnonymousMessage.sender_id", back_populates="sender")
     received_messages = relationship("AnonymousMessage", foreign_keys="AnonymousMessage.recipient_id", back_populates="recipient")
-    pending_messages = relationship("PendingMessage", back_populates="user")
 
 class AnonymousMessage(Base):
     __tablename__ = 'messages'
@@ -40,14 +39,12 @@ class PendingMessage(Base):
     __tablename__ = 'pending_messages'
     
     id = Column(Integer, primary_key=True)
-    recipient_tg_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    recipient_tg_id = Column(Integer, nullable=False, index=True)  # Убрали ForeignKey, т.к. это TG ID, а не PK users
     sender_tg_id = Column(Integer, nullable=True) # Кто отправил (если известен)
     content_text = Column(Text, nullable=True)
     content_file_id = Column(String, nullable=True)
     content_type = Column(String, default='text')
     created_at = Column(DateTime, default=datetime.utcnow)
-    
-    user = relationship("User", foreign_keys=[recipient_tg_id], back_populates="pending_messages")
 
 class AdminSession(Base):
     __tablename__ = 'admin_sessions'

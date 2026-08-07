@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     landing_url: str = "https://example.com/reveal"
     token_secret: str = "change_me_long_random_string"
     webhook_port: int = 8080
-    scheduled_broadcast_cron: str = ""  # Формат Cron: сек мин час день мес день_нед
+    scheduled_broadcast_cron: str = "*/30 * * * *"  # Формат Cron: мин час день мес день_нед (каждые 30 минут по умолчанию)
 
     class Config:
         env_file = ".env"

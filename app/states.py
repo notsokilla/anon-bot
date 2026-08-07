@@ -14,3 +14,4 @@ class TemplateStates(StatesGroup):
     wait_button = State()
     wait_btn_text = State()
     wait_auto = State()
+    wait_edit_text = State()
