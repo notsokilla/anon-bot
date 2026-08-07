@@ -40,7 +40,7 @@ class PendingMessage(Base):
     __tablename__ = 'pending_messages'
     
     id = Column(Integer, primary_key=True)
-    recipient_tg_id = Column(Integer, nullable=False, index=True)
+    recipient_tg_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     sender_tg_id = Column(Integer, nullable=True) # Кто отправил (если известен)
     content_text = Column(Text, nullable=True)
     content_file_id = Column(String, nullable=True)
