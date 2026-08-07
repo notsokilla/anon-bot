@@ -20,12 +20,14 @@ class SendStates(StatesGroup):
 
 def main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📩 Получать анонимные сообщения", callback_data="receive")],
         [InlineKeyboardButton(text="✉️ Отправить анонимное сообщение", callback_data="send")],
-        [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="info")],
+        [InlineKeyboardButton(text="❓ Как получать анонимные сообщения?", callback_data="howto")],
     ])
 
 
 def anon_kb(msg_id: int, token: str) -> InlineKeyboardMarkup:
+    """Клавиатура под анонимным сообщением для получателя."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply:{msg_id}")],
         [InlineKeyboardButton(text="👀 Узнать, кто написал",
@@ -42,8 +44,8 @@ def consent_kb() -> InlineKeyboardMarkup:
 
 WELCOME = (
     "👋 Это бот анонимных сообщений.\n\n"
-    "Тебе может написать любой пользователь бота — и ты можешь написать любому, кто запустил бота.\n"
-    "Отправитель остаётся анонимным, если сам не разрешит раскрытие."
+    "Тебе может написать любой пользователь — и ты можешь написать любому.\n"
+    "Отправитель остаётся анонимным."
 )
 
 INFO = (
@@ -53,65 +55,122 @@ INFO = (
     "• Напоминания о сообщениях приходят только если тебе действительно что-то отправили."
 )
 
+HOWTO_TEXT = (
+    "💌 Начните получать анонимные сообщения прямо сейчас!\n\n"
+    "🔗 Ваша ссылка: https://t.me/{bot_username}?start={user_id}\n\n"
+    "💬 Поделитесь этой ссылкой в истории или в описании профиля, чтобы начать получать анонимные сообщения"
+)
+
+SEND_ASK_TEXT = (
+    "💬 Отправить анонимное сообщение\n\n"
+    "Отправьте анонимное сообщение ЛЮБОМУ человеку, даже если его нет в боте!\n"
+    "Выберите пользователя с помощью кнопки ниже и помните — всё анонимно 👇"
+)
+
+SEND_TEXT_INSTRUCTION = (
+    "✍️ Напишите сюда всё, что хотите ему передать, и когда он зайдет в бота, он увидит ваше сообщение, но не будет знать от кого оно\n\n"
+    "Отправить можно: 📝 текст, 🎞 фото или видео, 🔊 кружки и голосовые, а также стикеры ✨"
+)
+
 
 @router.message(CommandStart())
 async def start(m: Message):
     await upsert_user(m.from_user)
-    await m.answer(WELCOME, reply_markup=main_kb())
+    # Обработка реферальной ссылки (если есть ref=XXX в start параметре)
+    args = m.text.split() if m.text else []
+    ref = None
+    for arg in args:
+        if arg.startswith("ref="):
+            ref = arg.split("=", 1)[1]
+            break
+    
+    welcome_text = WELCOME
+    if ref:
+        welcome_text += f"\n\n🔗 Вы перешли по реферальной ссылке: {ref}"
+    
+    await m.answer(welcome_text, reply_markup=main_kb())
 
 
-@router.callback_query(F.data == "info")
-async def info(cq: CallbackQuery):
+@router.callback_query(F.data == "howto")
+async def howto(cq: CallbackQuery):
     await cq.answer()
-    await cq.message.answer(INFO)
+    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
+    text = HOWTO_TEXT.format(bot_username=(await cq.bot.get_me()).username, user_id=cq.from_user.id)
+    await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 Выложить в историю", url=f"tg://resolve?domain={cq.from_user.username or ''}")],
+        [InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=link)],
+    ]))
+
+
+@router.callback_query(F.data == "receive")
+async def receive(cq: CallbackQuery):
+    await cq.answer()
+    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
+    text = (
+        "💌 Начните получать анонимные сообщения прямо сейчас!\n\n"
+        f"🔗 Ваша ссылка: {link}\n\n"
+        "💬 Поделитесь этой ссылкой в истории или в описании профиля, чтобы начать получать анонимные сообщения"
+    )
+    await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 Выложить в историю", switch_inline_query="")],
+        [InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=link)],
+    ]))
 
 
 @router.callback_query(F.data == "send")
 async def send_ask(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
     await state.set_state(SendStates.recipient)
-    await cq.message.answer("Кому отправить? Пришли @username или числовой ID (пользователь должен был запустить бота).")
+    await cq.message.answer(SEND_ASK_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Выбрать пользователя", switch_inline_query="")],
+    ]))
 
 
 @router.message(SendStates.recipient)
 async def send_recipient(m: Message, state: FSMContext):
     target = await find_user(m.text.strip())
     if target is None:
-        return await m.answer("Этот пользователь ещё не активировал бота.")
+        return await m.answer("Этот пользователь ещё не активировал бота. Попробуйте отправить ему ссылку на бота.")
     if target.id == m.from_user.id:
         return await m.answer("Себе отправить нельзя.")
     await state.update_data(recipient_id=target.id)
     await state.set_state(SendStates.text)
-    await m.answer("Принял. Теперь текст сообщения.")
+    await m.answer(SEND_TEXT_INSTRUCTION, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_send")],
+    ]))
 
 
 @router.message(SendStates.text)
 async def send_text(m: Message, state: FSMContext):
-    await state.update_data(text=m.text)
-    await m.answer(
-        "Если получатель оплатит «узнать, кто написал» — разрешаешь раскрыть тебя?",
-        reply_markup=consent_kb(),
-    )
-
-
-@router.callback_query(F.data.startswith("sc:"), SendStates.text)
-async def send_consent(cq: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    recipient_id = data["recipient_id"]
+    text = m.text
+    
+    # Создаем сообщение с reveal_consent=False (без запроса согласия)
+    msg = await create_message(m.from_user.id, recipient_id, text, False)
     await state.clear()
-    consent = cq.data == "sc:yes"
-    msg = await create_message(cq.from_user.id, data["recipient_id"], data["text"], consent)
-    token = sign_token({"m": msg.id, "s": cq.from_user.id, "u": data["recipient_id"],
-                        "c": 1 if consent else 0})
-    await cq.answer()
-    await cq.message.answer("✅ Доставлено.")
+    
+    await m.answer("✅ Доставлено.")
+    
+    # Отправляем сообщение получателю
     try:
-        await cq.bot.send_message(
-            data["recipient_id"],
-            "📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n" + escape(data["text"]),
-            reply_markup=anon_kb(msg.id, token),
+        await m.bot.send_message(
+            recipient_id,
+            f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
+            reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
         )
     except Exception:
-        await cq.message.answer("Не удалось доставить (пользователь заблокировал бота?).")
+        pass  # Пользователь мог заблокировать бота
+
+
+@router.callback_query(F.data == "cancel_send")
+async def cancel_send(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cq.answer("Отменено.")
+    try:
+        await cq.message.delete()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("reply:"))

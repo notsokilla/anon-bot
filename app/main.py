@@ -21,10 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 async def scheduled(bot: Bot):
-    """Задача по крону: напоминание о непрочитанных + опциональное промо с подписью."""
+    """Задача по крону: напоминание о непрочитанных."""
     await send_unread_reminders(bot)
-    if settings.scheduled_broadcast_text:
-        await send_broadcast(bot, settings.scheduled_broadcast_text)
+    # Автоматическая рассылка отключена - теперь только ручная через админку
 
 
 async def main():
