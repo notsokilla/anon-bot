@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from app.repo import stats, get_broadcast_templates, create_broadcast_template, update_broadcast_template, delete_broadcast_template, is_admin_session, create_admin_session, invalidate_admin_session
+from app.repo import stats, get_broadcast_templates, create_broadcast_template, update_broadcast_template, delete_broadcast_template, is_admin_session, create_admin_session, invalidate_admin_session, get_broadcast_template_by_id, get_user_by_username
 from app.config import settings
 from app.states import AdminStates, TemplateStates
 import asyncio
@@ -46,14 +46,8 @@ async def send_broadcast_with_kb(bot, text: str, kb: InlineKeyboardMarkup = None
 
 # --- Commands ---
 @router.message(Command("admin"))
-async def admin_cmd(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔐 Войти по паролю", callback_data="admin_login_pass")
-    await message.answer("Введите пароль администратора:", reply_markup=builder.as_markup())
-
-@router.callback_query(F.data == "admin_login_pass")
-async def login_pass_start(cq: types.CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Введите пароль:")
+async def admin_cmd(message: types.Message, state: FSMContext):
+    await message.answer("Введите пароль администратора:")
     await state.set_state(AdminStates.waiting_password)
 
 @router.message(AdminStates.waiting_password)
@@ -285,7 +279,8 @@ async def tmpl_edit(cq: types.CallbackQuery, state: FSMContext):
         return await cq.answer("Сессия истекла", show_alert=True)
     
     tmpl_id = int(cq.data.split("_")[-1])
-    tmpl = await get_broadcast_template_by_id(tmpl_id)
+    async with async_session_maker() as session:
+        tmpl = await get_broadcast_template_by_id(session, tmpl_id)
     
     if not tmpl:
         return await cq.answer("Шаблон не найден", show_alert=True)
@@ -316,7 +311,8 @@ async def tmpl_toggle_auto(cq: types.CallbackQuery):
         return await cq.answer("Сессия истекла", show_alert=True)
     
     tmpl_id = int(cq.data.split("_")[-1])
-    tmpl = await get_broadcast_template_by_id(tmpl_id)
+    async with async_session_maker() as session:
+        tmpl = await get_broadcast_template_by_id(session, tmpl_id)
     
     if tmpl:
         await update_broadcast_template(tmpl_id, use_in_auto=not tmpl.use_in_auto)
