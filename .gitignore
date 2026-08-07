@@ -1,34 +1,3 @@
 ```
-# Database files
-*.db
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv/
-.ENV
-.ENV.local
-.env.*
-.python-version
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-
-# Logs
-*.log
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+.env
 ```
