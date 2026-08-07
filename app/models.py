@@ -25,7 +25,7 @@ class AnonMessage(Base):
     sender_id: Mapped[int] = mapped_column(BigInteger)
     recipient_id: Mapped[int] = mapped_column(BigInteger)
     text: Mapped[str] = mapped_column(String(4096))
-    # согласие отправителя на раскрытие при оплате получателем
+    # согласие отправителя на раскрытие при оплате получателем (больше не используется)
     reveal_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -39,6 +39,8 @@ class Payment(Base):
     amount_kop: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default="paid")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # реферальный код (для интеграции со сторонним сайтом)
+    ref_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 class AdminSession(Base):
     __tablename__ = "admin_sessions"
