@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional, List
 from sqlalchemy import select, update, delete
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_session_maker
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Integer, String, Boolean, DateTime, Text
 from datetime import datetime
@@ -10,7 +10,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Создаем папку data если нет
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
