@@ -1,64 +1,79 @@
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import select, func, delete
-from sqlalchemy.orm import selectinload
-from typing import Optional
-from datetime import datetime, timedelta
-import uuid
 import os
 from pathlib import Path
-from .models import Base, User, AnonymousMessage, PendingMessage, AdminSession, BroadcastTemplate
-from .config import settings
+from typing import Optional, List
+from sqlalchemy import select, update, delete
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_session_maker
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import Integer, String, Boolean, DateTime, Text
+from datetime import datetime
+import logging
 
-# Определяем базовую директорию проекта
+logger = logging.getLogger(__name__)
+
+# Создаем папку data если нет
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Формируем правильный путь к базе данных
-db_path = DATA_DIR / "bot.db"
-database_url = f"sqlite+aiosqlite:///{db_path}"
+DB_PATH = DATA_DIR / "bot.db"
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
-engine = create_async_engine(database_url, echo=False)
-async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+engine = create_async_engine(DATABASE_URL, echo=False)
+async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+class Base(DeclarativeBase):
+    pass
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tg_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class PendingMessage(Base):
+    __tablename__ = "pending_messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipient_tg_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True) # ID получателя
+    recipient_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True) # Сохраняем юзернейм на всякий
+    sender_tg_id: Mapped[int] = mapped_column(Integer, nullable=True) # Кто отправил (может быть None если системное)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class BroadcastTemplate(Base):
+    __tablename__ = "broadcast_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    cron_schedule: Mapped[Optional[str]] = mapped_column(String(50), nullable=True) # Например "30 * * * *"
 
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
-    # Создаем стандартный шаблон, если его нет
+    # Проверка и создание дефолтного шаблона ТОЛЬКО если их нет вообще
     async with async_session_maker() as session:
-        result = await session.execute(select(BroadcastTemplate).where(BroadcastTemplate.text == "💌 Вам пришло новое анонимное сообщение!"))
-        template = result.scalar_one_or_none()
+        result = await session.execute(select(BroadcastTemplate))
+        templates = result.scalars().all()
         
-        if not template:
-            default_template = BroadcastTemplate(
-                text="💌 Вам пришло новое анонимное сообщение!\n\nНажмите кнопку ниже, чтобы узнать, кто это мог быть 👇",
-                image_id=None,
-                use_in_auto=False, # По умолчанию выключено
-                has_button=True,
-                button_text="Узнать кто",
-                button_url=settings.landing_url
+        if not templates:
+            default_tmpl = BroadcastTemplate(
+                name="Ежедневная рассылка",
+                text="💌 Вам пришло новое анонимное сообщение!",
+                is_active=False,
+                cron_schedule="30 * * * *"
             )
-            session.add(default_template)
+            session.add(default_tmpl)
             await session.commit()
+            logger.info("✅ Создан шаблон рассылки по умолчанию")
 
-async def get_user_by_username(session: AsyncSession, username: str) -> Optional[User]:
-    """Получить пользователя по юзернейму (без @)"""
-    result = await session.execute(select(User).where(User.username == username))
-    return result.scalar_one_or_none()
-
-async def get_broadcast_template_by_id(session: AsyncSession, template_id: int) -> Optional[BroadcastTemplate]:
-    """Получить шаблон рассылки по ID"""
-    result = await session.execute(select(BroadcastTemplate).where(BroadcastTemplate.id == template_id))
-    return result.scalar_one_or_none()
-
-async def get_or_create_user(tg_id: int, username: str = None, first_name: str = None, last_name: str = None):
+async def get_or_create_user(tg_id: int, username: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None, is_premium: bool = False) -> User:
     async with async_session_maker() as session:
-        user = await session.get(User, tg_id) # Используем tg_id как PK в модели, но в БД может быть id. Проверим модель.
-        # В модели User id - PK, tg_id - unique. Исправим логику поиска.
-        
-        stmt = select(User).where(User.tg_id == tg_id)
-        result = await session.execute(stmt)
+        result = await session.execute(select(User).where(User.tg_id == tg_id))
         user = result.scalar_one_or_none()
         
         if not user:
@@ -66,190 +81,106 @@ async def get_or_create_user(tg_id: int, username: str = None, first_name: str =
                 tg_id=tg_id,
                 username=username,
                 first_name=first_name,
-                last_name=last_name
+                last_name=last_name,
+                is_premium=is_premium
             )
             session.add(user)
             await session.commit()
             await session.refresh(user)
-            
-            # Проверяем_pending сообщения для нового пользователя
-            await deliver_pending_messages(session, tg_id)
-            
+            logger.info(f"➕ Новый пользователь: {tg_id} (@{username})")
         else:
-            # Обновляем имя/юзернейм
-            if username and user.username != username:
+            # Обновляем данные если изменились
+            if user.username != username or user.first_name != first_name:
                 user.username = username
-            if first_name and user.first_name != first_name:
                 user.first_name = first_name
-            if last_name and user.last_name != last_name:
                 user.last_name = last_name
-            await session.commit()
-            
+                user.is_premium = is_premium
+                await session.commit()
+        
         return user
 
-async def deliver_pending_messages(session, tg_id: int):
-    """Доставляет отложенные сообщения пользователю при входе"""
-    stmt = select(PendingMessage).where(PendingMessage.recipient_tg_id == tg_id)
-    result = await session.execute(stmt)
-    pending = result.scalars().all()
-    
-    if pending:
-        # Возвращаем список сообщений, чтобы хендлер мог их отправить
-        # Но в рамках этой функции мы просто помечаем их как доставленные или удаляем?
-        # Лучше вернуть их списком, а удаление сделать после успешной отправки в хендлере.
-        # Для упрощения: вернем объекты, а удалим их отдельно.
-        pass
-    
-    return pending
+async def get_user_by_tg_id(tg_id: int) -> Optional[User]:
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.tg_id == tg_id))
+        return result.scalar_one_or_none()
 
-async def add_pending_message(recipient_tg_id: int, sender_tg_id: int, text: str, file_id: str, content_type: str):
+async def get_user_by_username(username: str) -> Optional[User]:
+    """Ищет пользователя по юзернейму (без @)"""
+    clean_username = username.lstrip('@')
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.username == clean_username))
+        return result.scalar_one_or_none()
+
+async def save_pending_message(recipient_tg_id: int, recipient_username: Optional[str], text: str, sender_tg_id: Optional[int] = None):
     async with async_session_maker() as session:
         msg = PendingMessage(
             recipient_tg_id=recipient_tg_id,
-            sender_tg_id=sender_tg_id,
-            content_text=text,
-            content_file_id=file_id,
-            content_type=content_type
-        )
-        session.add(msg)
-        await session.commit()
-        return msg
-
-async def delete_pending_message(msg_id: int):
-    async with async_session_maker() as session:
-        await session.delete(await session.get(PendingMessage, msg_id))
-        await session.commit()
-
-async def save_message(sender_id: int, recipient_id: int, text: str, file_id: str, content_type: str):
-    async with async_session_maker() as session:
-        msg = AnonymousMessage(
-            sender_id=sender_id,
-            recipient_id=recipient_id,
-            content_text=text,
-            content_file_id=file_id,
-            content_type=content_type
-        )
-        session.add(msg)
-        await session.commit()
-        return msg
-
-async def get_unread_count(user_id: int):
-    async with async_session_maker() as session:
-        stmt = select(func.count()).select_from(AnonymousMessage).where(
-            AnonymousMessage.recipient_id == user_id,
-            AnonymousMessage.is_read == False
-        )
-        result = await session.execute(stmt)
-        return result.scalar() or 0
-
-async def get_unread_messages(user_id: int):
-    async with async_session_maker() as session:
-        stmt = select(AnonymousMessage).where(
-            AnonymousMessage.recipient_id == user_id,
-            AnonymousMessage.is_read == False
-        ).order_by(AnonymousMessage.created_at.asc())
-        result = await session.execute(stmt)
-        return result.scalars().all()
-
-async def mark_messages_read(messages_ids: list[int]):
-    async with async_session_maker() as session:
-        for msg_id in messages_ids:
-            msg = await session.get(AnonymousMessage, msg_id)
-            if msg:
-                msg.is_read = True
-        await session.commit()
-
-async def stats():
-    async with async_session_maker() as session:
-        users_count = await session.execute(select(func.count(User.id)))
-        msgs_count = await session.execute(select(func.count(AnonymousMessage.id)))
-        unread_count = await session.execute(
-            select(func.count(AnonymousMessage.id)).where(AnonymousMessage.is_read == False)
-        )
-        return {
-            "users": users_count.scalar() or 0,
-            "messages": msgs_count.scalar() or 0,
-            "unread": unread_count.scalar() or 0
-        }
-
-# --- Admin Session ---
-async def create_admin_session(user_id: int, ttl_minutes: int = 30):
-    async with async_session_maker() as session:
-        token = str(uuid.uuid4())
-        now = datetime.utcnow()
-        expires = now + timedelta(minutes=ttl_minutes)
-        
-        # Удаляем старые сессии
-        await session.execute(delete(AdminSession).where(AdminSession.user_id == user_id))
-        
-        sess = AdminSession(user_id=user_id, token=token, created_at=now, expires_at=expires)
-        session.add(sess)
-        await session.commit()
-        return token
-
-async def is_admin_session(user_id: int):
-    async with async_session_maker() as session:
-        now = datetime.utcnow()
-        stmt = select(AdminSession).where(
-            AdminSession.user_id == user_id,
-            AdminSession.expires_at > now
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none() is not None
-
-async def invalidate_admin_session(user_id: int):
-    async with async_session_maker() as session:
-        await session.execute(delete(AdminSession).where(AdminSession.user_id == user_id))
-        await session.commit()
-
-# --- Broadcast Templates ---
-async def get_broadcast_templates():
-    async with async_session_maker() as session:
-        stmt = select(BroadcastTemplate).order_by(BroadcastTemplate.created_at.desc())
-        result = await session.execute(stmt)
-        return result.scalars().all()
-
-async def get_auto_broadcast_templates():
-    async with async_session_maker() as session:
-        stmt = select(BroadcastTemplate).where(BroadcastTemplate.use_in_auto == True)
-        result = await session.execute(stmt)
-        return result.scalars().all()
-
-async def create_broadcast_template(text: str, image_id: str = None, use_in_auto: bool = False, 
-                                    has_button: bool = False, button_text: str = "Узнать", button_url: str = None):
-    async with async_session_maker() as session:
-        tmpl = BroadcastTemplate(
+            recipient_username=recipient_username,
             text=text,
-            image_id=image_id,
-            use_in_auto=use_in_auto,
-            has_button=has_button,
-            button_text=button_text,
-            button_url=button_url or settings.landing_url
+            sender_tg_id=sender_tg_id
         )
-        session.add(tmpl)
+        session.add(msg)
         await session.commit()
-        await session.refresh(tmpl)
-        return tmpl
+        logger.info(f"💾 Сообщение сохранено для пользователя {recipient_tg_id} (@{recipient_username})")
 
-async def update_broadcast_template(tmpl_id: int, **kwargs):
+async def get_pending_messages_for_user(tg_id: int, username: Optional[str] = None) -> List[PendingMessage]:
     async with async_session_maker() as session:
-        tmpl = await session.get(BroadcastTemplate, tmpl_id)
+        # Ищем сообщения где:
+        # 1. recipient_tg_id == tg_id (обычная доставка)
+        # 2. ИЛИ recipient_tg_id == 0 И recipient_username == текущий username (доставка по юзернейму)
+        
+        conditions = [PendingMessage.recipient_tg_id == tg_id]
+        if username:
+            conditions.append(
+                (PendingMessage.recipient_tg_id == 0) & (PendingMessage.recipient_username == username)
+            )
+        
+        query = select(PendingMessage).where(conditions[0] if len(conditions) == 1 else (conditions[0] | conditions[1]))
+        
+        result = await session.execute(query)
+        messages = result.scalars().all()
+        
+        if messages:
+            for msg in messages:
+                await session.delete(msg)
+            await session.commit()
+            logger.info(f"📬 Доставлено {len(messages)} отложенных сообщений для {tg_id}")
+            
+        return messages
+
+async def get_all_users() -> List[User]:
+    async with async_session_maker() as session:
+        result = await session.execute(select(User))
+        return list(result.scalars().all())
+
+# --- Шаблоны ---
+
+async def get_broadcast_templates() -> List[BroadcastTemplate]:
+    async with async_session_maker() as session:
+        result = await session.execute(select(BroadcastTemplate).order_by(BroadcastTemplate.id))
+        return list(result.scalars().all())
+
+async def get_broadcast_template_by_id(tmpl_id: int) -> Optional[BroadcastTemplate]:
+    async with async_session_maker() as session:
+        result = await session.execute(select(BroadcastTemplate).where(BroadcastTemplate.id == tmpl_id))
+        return result.scalar_one_or_none()
+
+async def update_broadcast_template(tmpl_id: int, name: Optional[str] = None, text: Optional[str] = None, is_active: Optional[bool] = None, cron_schedule: Optional[str] = None):
+    async with async_session_maker() as session:
+        tmpl = await get_broadcast_template_by_id(tmpl_id)
         if tmpl:
-            for key, value in kwargs.items():
-                if hasattr(tmpl, key):
-                    setattr(tmpl, key, value)
+            if name is not None: tmpl.name = name
+            if text is not None: tmpl.text = text
+            if is_active is not None: tmpl.is_active = is_active
+            if cron_schedule is not None: tmpl.cron_schedule = cron_schedule
             await session.commit()
             await session.refresh(tmpl)
         return tmpl
 
-async def delete_broadcast_template(tmpl_id: int):
+async def add_broadcast_template(name: str, text: str, is_active: bool = False, cron_schedule: Optional[str] = None) -> BroadcastTemplate:
     async with async_session_maker() as session:
-        tmpl = await session.get(BroadcastTemplate, tmpl_id)
-        if tmpl:
-            await session.delete(tmpl)
-            await session.commit()
-            return True
-        return False
-async def get_broadcast_template_by_id(tmpl_id: int):
-    async with async_session_maker() as session:
-        return await session.get(BroadcastTemplate, tmpl_id)
+        tmpl = BroadcastTemplate(name=name, text=text, is_active=is_active, cron_schedule=cron_schedule)
+        session.add(tmpl)
+        await session.commit()
+        await session.refresh(tmpl)
+        return tmpl
