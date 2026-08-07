@@ -1,63 +1,57 @@
 import asyncio
 import logging
-from pathlib import Path
-
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp import web
+from app.config import settings
+from app.handlers import user, admin
+from app.repo import init_db
+from app.scheduler import start_scheduler
+from aiohttp_socks import ProxyConnector
+import aiohttp
 
-from .config import settings
-from .db import init_db
-from .handlers import admin, user
-from .services.broadcast import send_broadcast, send_unread_reminders
-from .services.proxy import create_telegram_session
-from .services.webhook import start_webhook
+logging.basicConfig(level=logging.INFO)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+async def create_session():
+    if settings.proxy_dict:
+        try:
+            connector = ProxyConnector.from_url(settings.proxy_dict['proxy'])
+            session = aiohttp.ClientSession(connector=connector)
+            logging.info(f"🌐 Telegram через прокси: {settings.proxy_url.split('@')[1] if '@' in settings.proxy_url else settings.proxy_url}")
+            return session
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось подключиться через прокси ({e}), переключаемся на прямое подключение...")
+    
+    logging.info("🌐 Прямое подключение к Telegram")
+    return aiohttp.ClientSession()
 
-
-async def scheduled(bot: Bot):
-    """Задача по крону: напоминание о непрочитанных."""
-    await send_unread_reminders(bot)
-    # Автоматическая рассылка отключена - теперь только ручная через админку
-
+async def on_startup(app):
+    await init_db()
+    start_scheduler(app['bot'])
 
 async def main():
-    Path("data").mkdir(exist_ok=True)
-    await init_db()
-
-    # Создаём сессию (с проверкой прокси) и бота
-    session = await create_telegram_session()
-    bot = Bot(
-        token=settings.bot_token,
-        session=session,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_routers(user.router, admin.router)
-
-    await start_webhook()  # POST /api/paid — ленд отмечает оплаты
-    logger.info("✅ Вебхук для ленда поднят на порту %s", settings.webhook_port)
-
-    if settings.scheduled_broadcast_cron:
-        # При необходимости поменяй UTC на Europe/Moscow
-        scheduler = AsyncIOScheduler(timezone="UTC")
-        scheduler.add_job(
-            scheduled,
-            CronTrigger.from_crontab(settings.scheduled_broadcast_cron),
-            kwargs={"bot": bot},
-        )
-        scheduler.start()
-        logger.info("⏰ Планировщик рассылки запущен: %s", settings.scheduled_broadcast_cron)
-
-    logger.info("✅ Бот запущен, поллинг…")
+    session = await create_session()
+    bot = Bot(token=settings.bot_token, session=AiohttpSession(session=session))
+    dp = Dispatcher()
+    
+    dp.include_router(user.router)
+    dp.include_router(admin.router)
+    
+    app = web.Application()
+    app['bot'] = bot
+    app.on_startup.append(on_startup)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, 'localhost', settings.webhook_port)
+    await site.start()
+    logging.info(f"✅ Вебхук для ленда поднят на порту {settings.webhook_port}")
+    
+    logging.info("✅ Бот запущен, поллинг…")
     await dp.start_polling(bot)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен")

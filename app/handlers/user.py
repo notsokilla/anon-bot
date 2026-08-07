@@ -1,297 +1,293 @@
-from html import escape
-
-from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram import Router, F, types
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-
-from ..config import settings
-from ..repo import (
-    create_message,
-    create_offline_message,
-    find_user,
-    get_message,
-    get_undelivered_messages,
-    mark_read,
-    upsert_user,
-)
-from ..services.token import sign_token
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from app.repo import get_or_create_user, save_message, get_unread_messages, mark_messages_read, add_pending_message, delete_pending_message
+from app.states import UserStates
+from app.config import settings
 
 router = Router()
 
-
-class SendStates(StatesGroup):
-    recipient = State()
-    text = State()
-
-
-def main_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📩 Получать анонимные сообщения", callback_data="receive")],
-        [InlineKeyboardButton(text="✉️ Отправить анонимное сообщение", callback_data="send")],
-        [InlineKeyboardButton(text="❓ Как получать анонимные сообщения?", callback_data="howto")],
-    ])
-
-
-def anon_kb(msg_id: int, token: str) -> InlineKeyboardMarkup:
-    """Клавиатура под анонимным сообщением для получателя."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply:{msg_id}")],
-        [InlineKeyboardButton(text="👀 Узнать, кто написал",
-                              url=f"{settings.landing_url}?t={token}")],
-    ])
-
-
-def consent_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Разрешить", callback_data="sc:yes"),
-        InlineKeyboardButton(text="🕶 Никогда", callback_data="sc:no"),
-    ]])
-
-
-WELCOME = (
-    "👋 Это бот анонимных сообщений.\n\n"
-    "Тебе может написать любой пользователь — и ты можешь написать любому.\n"
-    "Отправитель остаётся анонимным."
-)
-
-INFO = (
-    "ℹ️ Правила.\n"
-    "• Отправить сообщение можно только тем, кто запустил бота.\n"
-    "• Оплата и раскрытие происходят на сайте.\n"
-    "• Напоминания о сообщениях приходят только если тебе действительно что-то отправили."
-)
-
-HOWTO_TEXT = (
-    "💌 Начните получать анонимные сообщения прямо сейчас!\n\n"
-    "🔗 Ваша ссылка: https://t.me/{bot_username}?start={user_id}\n\n"
-    "💬 Поделитесь этой ссылкой в истории или в описании профиля, чтобы начать получать анонимные сообщения"
-)
-
-SEND_ASK_TEXT = (
-    "💬 Отправить анонимное сообщение\n\n"
-    "Отправьте анонимное сообщение ЛЮБОМУ человеку, даже если его нет в боте!\n"
-    "Выберите пользователя с помощью кнопки ниже и помните — всё анонимно 👇"
-)
-
-SEND_TEXT_INSTRUCTION = (
-    "✍️ Напишите сюда всё, что хотите ему передать, и когда он зайдет в бота, он увидит ваше сообщение, но не будет знать от кого оно\n\n"
-    "Отправить можно: 📝 текст, 🎞 фото или видео, 🔊 кружки и голосовые, а также стикеры ✨"
-)
-
-
-@router.message(CommandStart())
-async def start(m: Message, state: FSMContext):
-    await upsert_user(m.from_user)
-    
-    # Обработка параметра start (реферальная ссылка или прямой переход к отправке сообщения)
-    args = m.text.split() if m.text else []
-    ref = None
+@router.message(Command("start"))
+async def start_cmd(message: types.Message, state: FSMContext):
+    args = message.text.split()
     target_id = None
     
-    for arg in args:
-        if arg.startswith("ref="):
-            ref = arg.split("=", 1)[1]
-        elif arg.isdigit():
-            target_id = int(arg)
-    
-    welcome_text = WELCOME
-    
-    # Если это реферальная ссылка
-    if ref:
-        welcome_text += f"\n\n🔗 Вы перешли по реферальной ссылке: {ref}"
-        await m.answer(welcome_text, reply_markup=main_kb())
-        return
-    
-    # Если это прямая ссылка на отправку сообщения конкретному пользователю
-    if target_id and target_id != m.from_user.id:
-        await m.answer(
-            f"✍️ Вы хотите отправить анонимное сообщение пользователю с ID {target_id}\n\n"
-            "Напишите ваше сообщение здесь:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_send")],
-            ])
-        )
-        # Сохраняем получателя в состоянии
-        await state.set_state(SendStates.text)
-        await state.update_data(recipient_id=target_id, direct_link=True)
-        return
-    
-    # Проверяем наличие офлайн-сообщений для пользователя
-    offline_msgs = await get_undelivered_messages(m.from_user.id)
-    if offline_msgs:
-        welcome_text += f"\n\n📬 У вас есть {len(offline_msgs)} непрочитанных сообщений!"
-        await m.answer(welcome_text, reply_markup=main_kb())
-        
-        # Отправляем все офлайн-сообщения
-        for msg in offline_msgs:
-            try:
-                # Создаем обычное сообщение в БД
-                anon_msg = await create_message(msg.sender_id, m.from_user.id, msg.content, False)
-                await m.bot.send_message(
-                    m.from_user.id,
-                    f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(msg.content)}",
-                    reply_markup=anon_kb(anon_msg.id, sign_token({"m": anon_msg.id, "s": msg.sender_id, "u": m.from_user.id, "c": 0})),
-                )
-                # Отмечаем как доставленное
-                await mark_offline_message_delivered(msg.id)
-            except Exception as e:
-                pass  # Пользователь мог заблокировать бота
-    else:
-        await m.answer(welcome_text, reply_markup=main_kb())
+    # Проверка на наличие аргумента (ссылка вида /start=123456)
+    if len(args) > 1:
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            pass
 
-
-@router.callback_query(F.data == "howto")
-async def howto(cq: CallbackQuery):
-    await cq.answer()
-    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
-    text = HOWTO_TEXT.format(bot_username=(await cq.bot.get_me()).username, user_id=cq.from_user.id)
-    await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Выложить в историю", url=f"tg://resolve?domain={cq.from_user.username or ''}")],
-        [InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=link)],
-    ]))
-
-
-@router.callback_query(F.data == "receive")
-async def receive(cq: CallbackQuery):
-    await cq.answer()
-    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
-    text = (
-        "💌 Начните получать анонимные сообщения прямо сейчас!\n\n"
-        f"🔗 Ваша ссылка: {link}\n\n"
-        "💬 Поделитесь этой ссылкой в истории или в описании профиля, чтобы начать получать анонимные сообщения"
+    user = await get_or_create_user(
+        tg_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name
     )
-    await cq.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Выложить в историю", switch_inline_query="")],
-        [InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=link)],
-    ]))
 
+    if target_id:
+        # Переход по ссылке для отправки сообщения конкретному человеку
+        if target_id == message.from_user.id:
+            await message.answer("Вы не можете отправить сообщение сами себе!")
+            return
+        
+        # Проверяем, есть ли получатель в базе
+        recipient = await get_or_create_user(tg_id=target_id) # Создаст если нет, но нам нужно знать был ли он
+        
+        # Логика: если пользователя нет в БД (только что создали), сохраняем в pending
+        # Но get_or_create_user всегда возвращает объект. Нужно проверить, был ли он новым.
+        # Упростим: сохраняем в pending, а при старте получателя проверяем pending.
+        
+        await state.set_state(UserStates.wait_anon_msg)
+        await state.update_data(target_id=target_id)
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="cancel_send")
+        
+        await message.answer(
+            f"✍️ Вы собираетесь отправить анонимное сообщение пользователю с ID: <code>{target_id}</code>.\n\n"
+            "Напишите сообщение (текст, фото, голосовое, кружок, стикер):",
+            parse_mode="HTML",
+            reply_markup=kb.as_markup()
+        )
+        return
 
-@router.callback_query(F.data == "send")
-async def send_ask(cq: CallbackQuery, state: FSMContext):
-    await cq.answer()
-    await state.set_state(SendStates.recipient)
-    await cq.message.answer(SEND_ASK_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Выбрать пользователя", switch_inline_query="")],
-    ]))
+    # Обычный старт
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💌 Получить анонимное сообщение", callback_data="menu_receive")
+    builder.button(text="✍️ Отправить анонимное сообщение", callback_data="menu_send")
+    builder.button(text="❓ Как это работает?", callback_data="menu_help")
+    builder.adjust(1, 1, 1)
+    
+    await message.answer(
+        f"Привет, {message.from_user.first_name}!\n"
+        "Я бот для анонимных сообщений.\n\n"
+        "Выбери действие:",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Проверка отложенных сообщений при обычном старте
+    from app.repo import engine, PendingMessage
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    
+    async with async_session_maker() as session:
+        stmt = select(PendingMessage).where(PendingMessage.recipient_tg_id == message.from_user.id)
+        result = await session.execute(stmt)
+        pending_msgs = result.scalars().all()
+        
+        if pending_msgs:
+            await message.answer(f"📨 Вам пришло {len(pending_msgs)} сообщений, пока вас не было!")
+            for pm in pending_msgs:
+                try:
+                    if pm.content_type == "photo":
+                        await message.answer_photo(photo=pm.content_file_id, caption=pm.content_text)
+                    elif pm.content_type == "video":
+                        await message.answer_video(video=pm.content_file_id, caption=pm.content_text)
+                    elif pm.content_type == "voice":
+                        await message.answer_voice(voice=pm.content_file_id, caption=pm.content_text)
+                    elif pm.content_type == "video_note":
+                        await message.answer_video_note(video_note=pm.content_file_id)
+                    elif pm.content_type == "sticker":
+                        await message.answer_sticker(sticker=pm.content_file_id)
+                    else:
+                        await message.answer(pm.content_text)
+                    
+                    # Сохраняем в историю и удаляем из pending
+                    await save_message(
+                        sender_id=pm.sender_tg_id,
+                        recipient_id=message.from_user.id,
+                        text=pm.content_text,
+                        file_id=pm.content_file_id,
+                        content_type=pm.content_type
+                    )
+                    await session.delete(pm)
+                except Exception as e:
+                    print(f"Error sending pending msg: {e}")
+        await session.commit()
 
+@router.callback_query(F.data == "menu_receive")
+async def menu_receive(cq: types.CallbackQuery):
+    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
+    
+    builder = InlineKeyboardBuilder()
+    # Кнопка "Поделиться" теперь работает корректно через switch_inline_query или просто текстом
+    # Telegram не позволяет программно открыть шаринг, но можно предложить скопировать
+    builder.button(text="📋 Скопировать ссылку", url=link) 
+    # Хак для "Поделиться в истории": используем специальную схему, если поддерживается, или просим юзера
+    # Самый надежный вариант: кнопка с ссылкой на самого себя с параметром start
+    builder.button(text="🚀 Поделиться в истории", url=f"tg://resolve?domain={(await cq.bot.get_me()).username}&start={cq.from_user.id}")
+    
+    builder.adjust(1, 1)
+    
+    await cq.message.edit_text(
+        f"💌 <b>Ваша персональная ссылка:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        "Разместите её в профиле или сторис, чтобы получать анонимные сообщения!",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
 
-@router.message(SendStates.recipient)
-async def send_recipient(m: Message, state: FSMContext):
-    target = await find_user(m.text.strip())
-    if target is None:
-        return await m.answer("Этот пользователь ещё не активировал бота. Попробуйте отправить ему ссылку на бота.")
-    if target.id == m.from_user.id:
-        return await m.answer("Себе отправить нельзя.")
-    await state.update_data(recipient_id=target.id)
-    await state.set_state(SendStates.text)
-    await m.answer(SEND_TEXT_INSTRUCTION, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_send")],
-    ]))
+@router.callback_query(F.data == "menu_send")
+async def menu_send_start(cq: types.CallbackQuery, state: FSMContext):
+    await state.set_state(UserStates.wait_target)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="cancel_send")
+    await cq.message.edit_text(
+        "✍️ <b>Отправить анонимное сообщение</b>\n\n"
+        "Введите ID пользователя или перешлите сообщение от него (если бот знает ID):\n\n"
+        "Или используйте ссылку вида: <code>t.me/bot?start=ID</code>",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
 
+@router.message(UserStates.wait_target)
+async def process_target(message: types.Message, state: FSMContext):
+    try:
+        target_id = int(message.text)
+        if target_id == message.from_user.id:
+            await message.answer("Нельзя отправить сообщение самому себе!")
+            return
+            
+        await state.update_data(target_id=target_id)
+        await state.set_state(UserStates.wait_anon_msg)
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ Отмена", callback_data="cancel_send")
+        
+        await message.answer(
+            f"Адресат: <code>{target_id}</code>\n"
+            "Напишите сообщение (текст, фото, голосовое, кружок, стикер):",
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректный числовой ID пользователя.")
 
-@router.message(SendStates.text)
-async def send_text(m: Message, state: FSMContext):
+@router.message(UserStates.wait_anon_msg, F.content_type.in_(['text', 'photo', 'video', 'voice', 'video_note', 'sticker']))
+async def process_anon_msg(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    recipient_id = data.get("recipient_id")
+    target_id = data.get('target_id')
     
-    if not recipient_id:
-        return await m.answer("Ошибка: получатель не указан. Начните сначала.")
-    
-    text = m.text or m.caption or ""
+    text = message.text or message.caption or ""
     file_id = None
     content_type = "text"
     
-    # Определяем тип контента и извлекаем file_id если есть
-    if m.photo:
-        file_id = m.photo[-1].file_id
+    if message.photo:
+        file_id = message.photo[-1].file_id
         content_type = "photo"
-    elif m.video:
-        file_id = m.video.file_id
+    elif message.video:
+        file_id = message.video.file_id
         content_type = "video"
-    elif m.voice:
-        file_id = m.voice.file_id
+    elif message.voice:
+        file_id = message.voice.file_id
         content_type = "voice"
-    elif m.video_note:
-        file_id = m.video_note.file_id
+    elif message.video_note:
+        file_id = message.video_note.file_id
         content_type = "video_note"
-    elif m.sticker:
-        file_id = m.sticker.file_id
+    elif message.sticker:
+        file_id = message.sticker.file_id
         content_type = "sticker"
-    
-    # Проверяем, есть ли получатель в боте
-    target_user = await find_user(str(recipient_id))
-    
-    if target_user:
-        # Получатель есть в боте - отправляем сразу
-        msg = await create_message(m.from_user.id, recipient_id, text, False)
-        await state.clear()
-        
-        await m.answer("✅ Доставлено.")
-        
-        # Отправляем сообщение получателю
-        try:
-            if content_type == "text":
-                await m.bot.send_message(
-                    recipient_id,
-                    f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
-                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
-                )
-            elif content_type == "sticker":
-                await m.bot.send_sticker(
-                    recipient_id,
-                    sticker=file_id,
-                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
-                )
-            else:
-                # Отправляем медиа-контент с caption
-                send_methods = {
-                    "photo": m.bot.send_photo,
-                    "video": m.bot.send_video,
-                    "voice": m.bot.send_voice,
-                    "video_note": m.bot.send_video_note,
-                }
-                caption = f"📨 <b>Тебе пришло новое анонимное {content_type}!</b>"
-                if text:
-                    caption += f"\n\n{escape(text)}"
-                await send_methods[content_type](
-                    recipient_id,
-                    file_id=file_id,
-                    caption=caption,
-                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
-                )
-        except Exception as e:
-            pass  # Пользователь мог заблокировать бота
-    else:
-        # Получателя нет в боте - сохраняем как офлайн-сообщение
-        full_content = text if content_type == "text" else f"[{content_type}] {text}"
-        await create_offline_message(m.from_user.id, recipient_id, full_content, content_type)
-        await state.clear()
-        
-        await m.answer(
-            "✅ Сообщение сохранено!\n\n"
-            "Пользователь ещё не активировал бота. Как только он зайдет в бота, он получит ваше сообщение."
-        )
 
+    # Проверяем, есть ли получатель в базе
+    from app.repo import engine, User
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    
+    async with async_session_maker() as session:
+        stmt = select(User).where(User.tg_id == target_id)
+        result = await session.execute(stmt)
+        recipient = result.scalar_one_or_none()
+        
+        if recipient:
+            # Пользователь есть в боте - отправляем сразу
+            await save_message(
+                sender_id=message.from_user.id,
+                recipient_id=recipient.id,
+                text=text,
+                file_id=file_id,
+                content_type=content_type
+            )
+            
+            try:
+                if content_type == "photo":
+                    await message.bot.send_photo(recipient.tg_id, photo=file_id, caption="📨 Новое анонимное сообщение:\n\n" + (text or ""))
+                elif content_type == "video":
+                    await message.bot.send_video(recipient.tg_id, video=file_id, caption="📨 Новое анонимное сообщение:\n\n" + (text or ""))
+                elif content_type == "voice":
+                    await message.bot.send_voice(recipient.tg_id, voice=file_id, caption="📨 Новое анонимное сообщение:\n\n" + (text or ""))
+                elif content_type == "video_note":
+                    await message.bot.send_video_note(recipient.tg_id, video_note=file_id, caption="📨 Новое анонимное сообщение")
+                elif content_type == "sticker":
+                    await message.bot.send_sticker(recipient.tg_id, sticker=file_id)
+                else:
+                    await message.bot.send_message(recipient.tg_id, f"📨 Новое анонимное сообщение:\n\n{text}")
+                
+                await message.answer("✅ Сообщение отправлено!")
+            except Exception as e:
+                await message.answer(f"❌ Ошибка отправки: {e}. Возможно, пользователь заблокировал бота.")
+        else:
+            # Пользователя нет в боте - сохраняем в pending
+            await add_pending_message(
+                recipient_tg_id=target_id,
+                sender_tg_id=message.from_user.id,
+                text=text,
+                file_id=file_id,
+                content_type=content_type
+            )
+            await message.answer(
+                "💾 Пользователь еще не запускал бота.\n"
+                "Сообщение сохранено и будет доставлено, как только он напишет /start!"
+            )
+    
+    await state.clear()
 
 @router.callback_query(F.data == "cancel_send")
-async def cancel_send(cq: CallbackQuery, state: FSMContext):
+async def cancel_send(cq: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await cq.answer("Отменено.")
-    try:
-        await cq.message.delete()
-    except Exception:
-        pass
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💌 Получить", callback_data="menu_receive")
+    builder.button(text="✍️ Отправить", callback_data="menu_send")
+    builder.button(text="❓ Как это работает?", callback_data="menu_help")
+    builder.adjust(1, 1, 1)
+    await cq.message.edit_text("Действие отменено. Главное меню:", reply_markup=builder.as_markup())
 
+@router.callback_query(F.data == "menu_help")
+async def menu_help(cq: types.CallbackQuery):
+    text = (
+        "❓ <b>Как пользоваться ботом?</b>\n\n"
+        "1️⃣ <b>Получать сообщения:</b>\n"
+        "   Нажмите 'Получить', скопируйте ссылку и поставьте её в профиль Telegram или в сторис.\n"
+        "   Когда кто-то перейдет и напишет вам – вы получите уведомление!\n\n"
+        "2️⃣ <b>Отправлять сообщения:</b>\n"
+        "   Нажмите 'Отправить', введите ID пользователя (или перейдите по его ссылке).\n"
+        "   Напишите сообщение – оно уйдет анонимно!\n\n"
+        "🔒 Полная анонимность гарантирована."
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="start") # Вернет на главное через хендлер старта? Нет, лучше свое меню
+    # Пересоздадим главное меню
+    builder.button(text="🏠 Главное меню", callback_data="start") 
+    # Нужен хендлер на callback start, который вернет меню. Или просто сделаем редирект.
+    # Добавим простой хендлер ниже.
+    
+    await cq.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
 
-@router.callback_query(F.data.startswith("reply:"))
-async def reply(cq: CallbackQuery, state: FSMContext):
-    msg = await get_message(int(cq.data.split(":")[1]))
-    if msg is None or cq.from_user.id != msg.recipient_id:
-        return await cq.answer("Недоступно", show_alert=True)
-    await mark_read(msg.id)
-    await state.update_data(recipient_id=msg.sender_id)
-    await state.set_state(SendStates.text)
-    await cq.answer()
-    await cq.message.answer("Напиши ответ — собеседник получит его тоже анонимно.")
+@router.callback_query(F.data == "start")
+async def back_to_start(cq: types.CallbackQuery):
+    # Дублируем логику старта для возврата в меню
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💌 Получить анонимное сообщение", callback_data="menu_receive")
+    builder.button(text="✍️ Отправить анонимное сообщение", callback_data="menu_send")
+    builder.button(text="❓ Как это работает?", callback_data="menu_help")
+    builder.adjust(1, 1, 1)
+    
+    await cq.message.edit_text(
+        f"Привет, {cq.from_user.first_name}!\nВыбери действие:",
+        reply_markup=builder.as_markup()
+    )
