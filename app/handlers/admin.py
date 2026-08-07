@@ -120,7 +120,7 @@ async def pays_h(cq: CallbackQuery):
 async def bc_ask(cq: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.broadcast_text)
     await cq.answer()
-    await cq.message.answer("Текст рассылки. Уйдёт всем с подписью «Служебное уведомление».")
+    await cq.message.answer("Текст рассылки. Уйдёт всем пользователям.")
 
 
 @router.message(AdminStates.broadcast_text, IsAdmin())
