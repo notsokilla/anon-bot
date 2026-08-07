@@ -1,8 +1,7 @@
-from sqlalchemy import func, select
-
 from .db import Session
-from .models import AdminSession, AnonMessage, Payment, User
+from .models import AdminSession, AnonMessage, OfflineMessage, Payment, User
 from .utils import utcnow
+from sqlalchemy import func, select
 
 
 async def upsert_user(tg) -> None:
@@ -27,13 +26,46 @@ async def find_user(raw: str):
         )).scalar_one_or_none()
 
 
-async def create_message(sender_id: int, recipient_id: int, text: str) -> AnonMessage:
+async def create_message(sender_id: int, recipient_id: int, text: str, reveal_consent: bool) -> AnonMessage:
     async with Session() as s:
-        m = AnonMessage(sender_id=sender_id, recipient_id=recipient_id, text=text)
+        m = AnonMessage(sender_id=sender_id, recipient_id=recipient_id,
+                        text=text, reveal_consent=reveal_consent)
         s.add(m)
         await s.commit()
         await s.refresh(m)
         return m
+
+
+async def create_offline_message(sender_id: int, recipient_id: int, content: str, content_type: str = "text") -> OfflineMessage:
+    """Создать офлайн-сообщение для пользователя, которого нет в боте"""
+    async with Session() as s:
+        m = OfflineMessage(sender_id=sender_id, recipient_id=recipient_id,
+                          content=content, content_type=content_type)
+        s.add(m)
+        await s.commit()
+        await s.refresh(m)
+        return m
+
+
+async def get_undelivered_messages(user_id: int) -> list[OfflineMessage]:
+    """Получить все недоставленные сообщения для пользователя"""
+    async with Session() as s:
+        result = await s.execute(
+            select(OfflineMessage)
+            .where(OfflineMessage.recipient_id == user_id)
+            .where(OfflineMessage.is_delivered == False)
+            .order_by(OfflineMessage.created_at)
+        )
+        return list(result.scalars().all())
+
+
+async def mark_offline_message_delivered(msg_id: int):
+    """Отметить офлайн-сообщение как доставленное"""
+    async with Session() as s:
+        m = await s.get(OfflineMessage, msg_id)
+        if m:
+            m.is_delivered = True
+        await s.commit()
 
 
 async def get_message(mid: int):
@@ -79,23 +111,12 @@ async def stats() -> dict:
             "users_total": await s.scalar(select(func.count(User.id))),
             "users_today": await s.scalar(select(func.count(User.id)).where(User.started_at >= today)),
             "messages": await s.scalar(select(func.count(AnonMessage.id))),
+            "offline_messages": await s.scalar(select(func.count(OfflineMessage.id))),
             "payments_count": await s.scalar(select(func.count(Payment.id)).where(Payment.status == "paid")),
             "payments_sum": await s.scalar(
                 select(func.coalesce(func.sum(Payment.amount_kop), 0)).where(Payment.status == "paid")),
-            "reveal_yes": await s.scalar(select(func.count(AnonMessage.id)).where(AnonMessage.reveal_status == "yes")),
-            "reveal_no": await s.scalar(select(func.count(AnonMessage.id)).where(AnonMessage.reveal_status == "no")),
-            "reveal_pending": await s.scalar(select(func.count(AnonMessage.id)).where(AnonMessage.reveal_status == "pending")),
         }
     
-async def create_message(sender_id: int, recipient_id: int, text: str, reveal_consent: bool) -> AnonMessage:
-    async with Session() as s:
-        m = AnonMessage(sender_id=sender_id, recipient_id=recipient_id,
-                        text=text, reveal_consent=reveal_consent)
-        s.add(m)
-        await s.commit()
-        await s.refresh(m)
-        return m
-
 
 async def mark_read(mid: int):
     async with Session() as s:

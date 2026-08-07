@@ -7,7 +7,15 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..config import settings
-from ..repo import create_message, find_user, get_message, mark_read, upsert_user
+from ..repo import (
+    create_message,
+    create_offline_message,
+    find_user,
+    get_message,
+    get_undelivered_messages,
+    mark_read,
+    upsert_user,
+)
 from ..services.token import sign_token
 
 router = Router()
@@ -69,19 +77,64 @@ SEND_TEXT_INSTRUCTION = (
 @router.message(CommandStart())
 async def start(m: Message):
     await upsert_user(m.from_user)
-    # Обработка реферальной ссылки (если есть ref=XXX в start параметре)
+    
+    # Обработка параметра start (реферальная ссылка или прямой переход к отправке сообщения)
     args = m.text.split() if m.text else []
     ref = None
+    target_id = None
+    
     for arg in args:
         if arg.startswith("ref="):
             ref = arg.split("=", 1)[1]
-            break
+        elif arg.isdigit():
+            target_id = int(arg)
     
     welcome_text = WELCOME
+    
+    # Если это реферальная ссылка
     if ref:
         welcome_text += f"\n\n🔗 Вы перешли по реферальной ссылке: {ref}"
+        await m.answer(welcome_text, reply_markup=main_kb())
+        return
     
-    await m.answer(welcome_text, reply_markup=main_kb())
+    # Если это прямая ссылка на отправку сообщения конкретному пользователю
+    if target_id and target_id != m.from_user.id:
+        await m.answer(
+            f"✍️ Вы хотите отправить анонимное сообщение пользователю с ID {target_id}\n\n"
+            "Напишите ваше сообщение здесь:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_send")],
+            ])
+        )
+        # Сохраняем получателя в состоянии
+        async with FSMContext().storage.set_data(chat=m.chat.id, user=m.from_user.id) as data:
+            data["recipient_id"] = target_id
+            data["direct_link"] = True
+        await SendStates.text.set()
+        return
+    
+    # Проверяем наличие офлайн-сообщений для пользователя
+    offline_msgs = await get_undelivered_messages(m.from_user.id)
+    if offline_msgs:
+        welcome_text += f"\n\n📬 У вас есть {len(offline_msgs)} непрочитанных сообщений!"
+        await m.answer(welcome_text, reply_markup=main_kb())
+        
+        # Отправляем все офлайн-сообщения
+        for msg in offline_msgs:
+            try:
+                # Создаем обычное сообщение в БД
+                anon_msg = await create_message(msg.sender_id, m.from_user.id, msg.content, False)
+                await m.bot.send_message(
+                    m.from_user.id,
+                    f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(msg.content)}",
+                    reply_markup=anon_kb(anon_msg.id, sign_token({"m": anon_msg.id, "s": msg.sender_id, "u": m.from_user.id, "c": 0})),
+                )
+                # Отмечаем как доставленное
+                await mark_offline_message_delivered(msg.id)
+            except Exception as e:
+                pass  # Пользователь мог заблокировать бота
+    else:
+        await m.answer(welcome_text, reply_markup=main_kb())
 
 
 @router.callback_query(F.data == "howto")
@@ -136,24 +189,41 @@ async def send_recipient(m: Message, state: FSMContext):
 @router.message(SendStates.text)
 async def send_text(m: Message, state: FSMContext):
     data = await state.get_data()
-    recipient_id = data["recipient_id"]
-    text = m.text
+    recipient_id = data.get("recipient_id")
     
-    # Создаем сообщение с reveal_consent=False (без запроса согласия)
-    msg = await create_message(m.from_user.id, recipient_id, text, False)
-    await state.clear()
+    if not recipient_id:
+        return await m.answer("Ошибка: получатель не указан. Начните сначала.")
     
-    await m.answer("✅ Доставлено.")
+    text = m.text or m.caption or ""
     
-    # Отправляем сообщение получателю
-    try:
-        await m.bot.send_message(
-            recipient_id,
-            f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
-            reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
+    # Проверяем, есть ли получатель в боте
+    target_user = await find_user(str(recipient_id))
+    
+    if target_user:
+        # Получатель есть в боте - отправляем сразу
+        msg = await create_message(m.from_user.id, recipient_id, text, False)
+        await state.clear()
+        
+        await m.answer("✅ Доставлено.")
+        
+        # Отправляем сообщение получателю
+        try:
+            await m.bot.send_message(
+                recipient_id,
+                f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
+                reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
+            )
+        except Exception:
+            pass  # Пользователь мог заблокировать бота
+    else:
+        # Получателя нет в боте - сохраняем как офлайн-сообщение
+        await create_offline_message(m.from_user.id, recipient_id, text)
+        await state.clear()
+        
+        await m.answer(
+            "✅ Сообщение сохранено!\n\n"
+            "Пользователь ещё не активировал бота. Как только он зайдет в бота, он получит ваше сообщение."
         )
-    except Exception:
-        pass  # Пользователь мог заблокировать бота
 
 
 @router.callback_query(F.data == "cancel_send")
