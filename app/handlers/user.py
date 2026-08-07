@@ -82,7 +82,7 @@ SEND_TEXT_INSTRUCTION = (
 
 
 @router.message(CommandStart())
-async def start(m: Message):
+async def start(m: Message, state: FSMContext):
     await upsert_user(m.from_user)
     
     # Обработка параметра start (реферальная ссылка или прямой переход к отправке сообщения)
@@ -114,10 +114,8 @@ async def start(m: Message):
             ])
         )
         # Сохраняем получателя в состоянии
-        async with FSMContext().storage.set_data(chat=m.chat.id, user=m.from_user.id) as data:
-            data["recipient_id"] = target_id
-            data["direct_link"] = True
-        await SendStates.text.set()
+        await state.set_state(SendStates.text)
+        await state.update_data(recipient_id=target_id, direct_link=True)
         return
     
     # Проверяем наличие офлайн-сообщений для пользователя
@@ -202,6 +200,25 @@ async def send_text(m: Message, state: FSMContext):
         return await m.answer("Ошибка: получатель не указан. Начните сначала.")
     
     text = m.text or m.caption or ""
+    file_id = None
+    content_type = "text"
+    
+    # Определяем тип контента и извлекаем file_id если есть
+    if m.photo:
+        file_id = m.photo[-1].file_id
+        content_type = "photo"
+    elif m.video:
+        file_id = m.video.file_id
+        content_type = "video"
+    elif m.voice:
+        file_id = m.voice.file_id
+        content_type = "voice"
+    elif m.video_note:
+        file_id = m.video_note.file_id
+        content_type = "video_note"
+    elif m.sticker:
+        file_id = m.sticker.file_id
+        content_type = "sticker"
     
     # Проверяем, есть ли получатель в боте
     target_user = await find_user(str(recipient_id))
@@ -215,16 +232,41 @@ async def send_text(m: Message, state: FSMContext):
         
         # Отправляем сообщение получателю
         try:
-            await m.bot.send_message(
-                recipient_id,
-                f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
-                reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
-            )
-        except Exception:
+            if content_type == "text":
+                await m.bot.send_message(
+                    recipient_id,
+                    f"📨 <b>Тебе пришло новое анонимное сообщение!</b>\n\n{escape(text)}",
+                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
+                )
+            elif content_type == "sticker":
+                await m.bot.send_sticker(
+                    recipient_id,
+                    sticker=file_id,
+                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
+                )
+            else:
+                # Отправляем медиа-контент с caption
+                send_methods = {
+                    "photo": m.bot.send_photo,
+                    "video": m.bot.send_video,
+                    "voice": m.bot.send_voice,
+                    "video_note": m.bot.send_video_note,
+                }
+                caption = f"📨 <b>Тебе пришло новое анонимное {content_type}!</b>"
+                if text:
+                    caption += f"\n\n{escape(text)}"
+                await send_methods[content_type](
+                    recipient_id,
+                    file_id=file_id,
+                    caption=caption,
+                    reply_markup=anon_kb(msg.id, sign_token({"m": msg.id, "s": m.from_user.id, "u": recipient_id, "c": 0})),
+                )
+        except Exception as e:
             pass  # Пользователь мог заблокировать бота
     else:
         # Получателя нет в боте - сохраняем как офлайн-сообщение
-        await create_offline_message(m.from_user.id, recipient_id, text)
+        full_content = text if content_type == "text" else f"[{content_type}] {text}"
+        await create_offline_message(m.from_user.id, recipient_id, full_content, content_type)
         await state.clear()
         
         await m.answer(

@@ -112,6 +112,7 @@ async def stats() -> dict:
             "users_today": await s.scalar(select(func.count(User.id)).where(User.started_at >= today)),
             "messages": await s.scalar(select(func.count(AnonMessage.id))),
             "offline_messages": await s.scalar(select(func.count(OfflineMessage.id))),
+            "unread": await s.scalar(select(func.count(AnonMessage.id)).where(AnonMessage.is_read == False)),
             "payments_count": await s.scalar(select(func.count(Payment.id)).where(Payment.status == "paid")),
             "payments_sum": await s.scalar(
                 select(func.coalesce(func.sum(Payment.amount_kop), 0)).where(Payment.status == "paid")),

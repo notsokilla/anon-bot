@@ -118,15 +118,47 @@ async def pays_h(cq: CallbackQuery):
 
 @router.callback_query(F.data == "adm:bc", IsAdmin())
 async def bc_ask(cq: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.broadcast_text)
     await cq.answer()
-    await cq.message.answer("Текст рассылки. Уйдёт всем пользователям.")
+    await cq.message.answer(
+        "📨 <b>Рассылка шаблонов</b>\n\n"
+        "Выберите тип рассылки:\n"
+        "1️⃣ <b>Простая рассылка</b> - просто текст без кнопок\n"
+        "2️⃣ <b>Рассылка с кнопкой оплаты</b> - текст + кнопка \"Купить подписку\"",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Простая рассылка", callback_data="adm:bc_simple")],
+            [InlineKeyboardButton(text="💎 Рассылка с оплатой", callback_data="adm:bc_premium")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:bc_no")],
+        ])
+    )
+
+
+@router.callback_query(F.data == "adm:bc_simple", IsAdmin())
+async def bc_simple_ask(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.broadcast_text)
+    await state.update_data(bc_type="simple")
+    await cq.answer()
+    await cq.message.answer("Введите текст рассылки:")
+
+
+@router.callback_query(F.data == "adm:bc_premium", IsAdmin())
+async def bc_premium_ask(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.broadcast_text)
+    await state.update_data(bc_type="premium")
+    await cq.answer()
+    await cq.message.answer("Введите текст рассылки (после будет добавлена кнопка «Купить подписку»):")
 
 
 @router.message(AdminStates.broadcast_text, IsAdmin())
 async def bc_text(m: Message, state: FSMContext):
+    data = await state.get_data()
+    bc_type = data.get("bc_type", "simple")
+    
+    preview_text = m.text
+    if bc_type == "premium":
+        preview_text += "\n\n[Кнопка: Купить подписку]"
+    
     await state.update_data(bc=m.text)
-    await m.answer("Отправить это всем?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await m.answer(f"Отправить это всем?\n\n{preview_text}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отправить", callback_data="adm:bc_yes"),
          InlineKeyboardButton(text="❌ Отмена", callback_data="adm:bc_no")],
     ]))
@@ -137,7 +169,21 @@ async def bc_yes(cq: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     await cq.answer("Рассылаю…")
-    n = await send_broadcast(cq.bot, data.get("bc", ""))
+    
+    bc_type = data.get("bc_type", "simple")
+    text = data.get("bc", "")
+    
+    if bc_type == "premium":
+        # Рассылка с кнопкой оплаты
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Купить подписку", url=f"{settings.landing_url}?action=premium")],
+        ])
+        n = await send_broadcast_with_kb(cq.bot, text, kb)
+    else:
+        # Простая рассылка
+        n = await send_broadcast(cq.bot, text)
+    
     await cq.message.answer(f"Готово. Отправлено {n} пользователям.")
 
 
