@@ -39,12 +39,16 @@ class PendingMessage(Base):
     __tablename__ = 'pending_messages'
     
     id = Column(Integer, primary_key=True)
-    recipient_tg_id = Column(Integer, nullable=False, index=True)  # Убрали ForeignKey, т.к. это TG ID, а не PK users
-    sender_tg_id = Column(Integer, nullable=True) # Кто отправил (если известен)
+    recipient_tg_id = Column(Integer, ForeignKey('users.tg_id'), nullable=False, index=True)  # Связь с users.tg_id
+    sender_tg_id = Column(Integer, ForeignKey('users.tg_id'), nullable=True)  # Кто отправил (если известен)
     content_text = Column(Text, nullable=True)
     content_file_id = Column(String, nullable=True)
     content_type = Column(String, default='text')
     created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Связи с User через tg_id
+    recipient = relationship("User", foreign_keys=[recipient_tg_id], primaryjoin="PendingMessage.recipient_tg_id == User.tg_id")
+    sender = relationship("User", foreign_keys=[sender_tg_id], primaryjoin="PendingMessage.sender_tg_id == User.tg_id")
 
 class AdminSession(Base):
     __tablename__ = 'admin_sessions'
