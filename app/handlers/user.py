@@ -18,6 +18,9 @@ class UserStates(StatesGroup):
 
 @router.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
+    # Очищаем состояние при старте
+    await state.clear()
+    
     user = await get_or_create_user(
         tg_id=message.from_user.id,
         username=message.from_user.username,
@@ -33,9 +36,8 @@ async def start_cmd(message: types.Message, state: FSMContext):
     welcome_text += "Я — анонимный бот. Ты можешь отправлять сообщения другим пользователям или получать их.\n\n"
     
     if pending_msgs:
-        welcome_text += f"📬 **У вас {len(pending_msgs)} новых сообщений пока вы отсутствовали!**\n\n"
+        welcome_text += f"📬 **У вас {len(pending_msgs)} новых сообщений!**\n\n"
         for msg in pending_msgs:
-            # Если есть sender_tg_id, можно попробовать показать кто, но это анонимно обычно
             await message.answer(f"📨 <b>Анонимное сообщение:</b>\n\n{msg.text}", parse_mode="HTML")
         welcome_text += "Все старые сообщения показаны выше."
     
@@ -46,7 +48,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="📖 Инструкция", callback_data="help_info")]
         ])
     )
-    await state.clear()
 
 @router.callback_query(F.data == "send_letter")
 async def send_letter_start(callback: types.CallbackQuery, state: FSMContext):
@@ -55,7 +56,7 @@ async def send_letter_start(callback: types.CallbackQuery, state: FSMContext):
         "ℹ️ Если пользователя нет в базе, сообщение сохранится и придет, когда он запустит бота.",
         parse_mode="Markdown"
     )
-    await UserStates.waiting_for_recipient.set()
+    await state.set_state(UserStates.waiting_for_recipient)
 
 @router.message(UserStates.waiting_for_recipient)
 async def process_recipient(message: types.Message, state: FSMContext):
@@ -67,7 +68,8 @@ async def process_recipient(message: types.Message, state: FSMContext):
     # Пробуем найти по ID
     if recipient_input.isdigit():
         target_tg_id = int(recipient_input)
-        target_user = await get_or_create_user(tg_id=target_tg_id) # Создаем заглушку если нет
+        # Пытаемся найти существующего, если нет - создадим заглушку при отправке
+        target_user = await get_or_create_user(tg_id=target_tg_id) 
         target_username = target_user.username
     else:
         # Пробуем по юзернейму
@@ -78,38 +80,21 @@ async def process_recipient(message: types.Message, state: FSMContext):
             target_tg_id = target_user.tg_id
             target_username = target_user.username
         else:
-            # Пользователь не найден в БД. 
-            # Мы НЕ можем узнать его ID по юзернейму через API бота если он не писал боту.
-            # Но мы можем СОХРАНИТЬ сообщение с пометкой "для @username".
-            # Когда этот юзер напишет /start, мы проверим совпадение username.
-            # Для этого нам нужно сохранять в pending_messages не только tg_id, но и username.
-            # А в get_pending_messages_for_user искать и по username тоже.
-            # Упрощение: просим юзера сказать получателю "запусти бота".
-            # НО ты просил сохранить. Ок, сохраняем с tg_id=0 (специальный флаг) или просто игнорируем tg_id при поиске.
-            # Лучший вариант: сохраняем в БД как pending для username.
-            
-            await save_pending_message(
-                recipient_tg_id=0, # 0 означает "поиск по юзернейму при входе"
-                recipient_username=clean_username,
-                text="⏳ Ожидаем запуска бота получателем...", # Это черновик
-                sender_tg_id=message.from_user.id
-            )
-            # Перезапишем правильно ниже
-            
+            # Пользователь не найден в БД. Сохраняем намерение отправить ему по юзернейму.
             await message.answer(
                 f"⚠️ Пользователь **@{clean_username}** не найден в базе бота.\n\n"
-                "✅ Я сохранил ваше сообщение! Оно будет доставлено, как только этот пользователь запустит бота (/start).",
+                "Но я сохраню ваше сообщение! Оно будет доставлено, как только этот пользователь запустит бота (/start).",
                 parse_mode="Markdown"
             )
-            # Сохраняем реальное сообщение в контексте, чтобы спросить текст
+            # Сохраняем данные получателя в контексте и просим текст
             await state.update_data(pending_username=clean_username)
-            await UserStates.waiting_for_message.set()
+            await state.set_state(UserStates.waiting_for_message)
             return
 
     if target_user:
         await state.update_data(target_tg_id=target_tg_id, target_username=target_username)
-        await message.answer(f"👤 Получатель: {target_user.first_name} (@{target_username or 'нет'})\n\nНапишите сообщение:")
-        await UserStates.waiting_for_message.set()
+        await message.answer(f"👤 Получатель: {target_user.first_name or 'User'} (@{target_username or 'нет'})\n\nНапишите сообщение:")
+        await state.set_state(UserStates.waiting_for_message)
     else:
         await message.answer("❌ Не удалось определить получателя. Попробуйте снова (ID или @username).")
 
@@ -120,17 +105,17 @@ async def process_message(message: types.Message, state: FSMContext):
     
     target_tg_id = data.get("target_tg_id")
     target_username = data.get("target_username")
-    pending_username = data.get("pending_username") # Если искали по юзернейму и не нашли
+    pending_username = data.get("pending_username") # Если искали по юзернейму и не нашли в БД
     
     if pending_username:
-        # Сохраняем для будущего пользователя
+        # Сохраняем для будущего пользователя (tg_id=0 как маркер поиска по юзернейму)
         await save_pending_message(
-            recipient_tg_id=0, # Специальный маркер
+            recipient_tg_id=0, 
             recipient_username=pending_username,
             text=text,
             sender_tg_id=message.from_user.id
         )
-        await message.answer("✅ Сообщение сохранено и ждет своего часа!")
+        await message.answer("✅ Сообщение сохранено и ждет своего часа! Как только пользователь запустит бота, он его получит.")
     else:
         # Отправляем напрямую
         try:
@@ -140,3 +125,14 @@ async def process_message(message: types.Message, state: FSMContext):
             await message.answer(f"❌ Не удалось отправить: {e}\nВозможно, пользователь заблокировал бота.")
     
     await state.clear()
+
+@router.callback_query(F.data == "help_info")
+async def help_info(callback: types.CallbackQuery):
+    text = (
+        "📖 **Инструкция**:\n\n"
+        "1. Нажмите 'Отправить письмо'.\n"
+        "2. Введите ID или @username получателя.\n"
+        "3. Напишите текст сообщения.\n\n"
+        "Если получатель еще не запускал бота, сообщение сохранится и придет ему автоматически при первом запуске."
+    )
+    await callback.message.edit_text(text, parse_mode="Markdown")

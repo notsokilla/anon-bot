@@ -3,18 +3,15 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from app.config import settings
 from app.repo import (
     get_all_users, get_broadcast_templates, get_broadcast_template_by_id, 
-    update_broadcast_template, add_broadcast_template, async_session_maker
+    update_broadcast_template, add_broadcast_template
 )
-from sqlalchemy import select
-from app.models import BroadcastTemplate # Если есть отдельный файл моделей, иначе используй из repo
 import logging
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-ADMIN_PASSWORD = "admin123"  # ЗАМЕНИ НА СВОЙ ПАРОЛЬ!
 
 class AdminStates(StatesGroup):
     waiting_password = State()
@@ -27,14 +24,13 @@ class AdminStates(StatesGroup):
 # --- Вход в админку ---
 
 @router.message(Command("admin"))
-async def admin_login_start(message: types.Message):
+async def admin_login_start(message: types.Message, state: FSMContext):
     await message.answer("🔐 Введите пароль администратора:")
-    await message.bot.set_my_commands([]) # Опционально: скрыть команды
-    await AdminStates.waiting_password.set()
+    await state.set_state(AdminStates.waiting_password)
 
 @router.message(AdminStates.waiting_password)
 async def process_password(message: types.Message, state: FSMContext):
-    if message.text == ADMIN_PASSWORD:
+    if message.text == settings.admin_password:
         await message.answer("✅ Доступ разрешен. Выберите действие:", reply_markup=get_admin_menu())
         await state.clear()
     else:
@@ -55,9 +51,6 @@ def get_admin_menu():
 async def admin_exit(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("👋 Вы вышли из панели администратора.")
-    try:
-        await callback.bot.set_my_commands([types.BotCommand(command="start", description="Запустить бота")])
-    except: pass
 
 # --- Управление шаблонами ---
 
@@ -116,11 +109,8 @@ async def tmpl_change_name_process(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tmpl_id = data.get("tmpl_id")
     await update_broadcast_template(tmpl_id, name=message.text)
-    await message.answer("✅ Название обновлено.")
+    await message.answer("✅ Название обновлено. Вернитесь в меню шаблонов.")
     await state.clear()
-    # Возвращаем меню редактирования (нужно найти сообщение или просто предложить вернуться)
-    # Для простоты предложим команду или кнопку, но тут сложно без хранения msg_id. 
-    # Просто скажем что готово.
 
 @router.callback_query(F.data == "tmpl_change_text")
 async def tmpl_change_text_start(callback: types.CallbackQuery, state: FSMContext):
@@ -132,7 +122,7 @@ async def tmpl_change_text_process(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tmpl_id = data.get("tmpl_id")
     await update_broadcast_template(tmpl_id, text=message.text)
-    await message.answer("✅ Текст обновлен.")
+    await message.answer("✅ Текст обновлен. Вернитесь в меню шаблонов.")
     await state.clear()
 
 @router.callback_query(F.data == "tmpl_change_cron")
@@ -160,11 +150,8 @@ async def tmpl_toggle_status(callback: types.CallbackQuery):
         await update_broadcast_template(tmpl_id, is_active=new_status)
         status_str = "включен" if new_status else "выключен"
         await callback.answer(f"Шаблон {status_str}", show_alert=True)
-        # Обновляем меню
-        await tmpl_edit(callback, await FSMContext().get_context()) # Хак, лучше просто редирект
-        
-        # Простой редирект через повторный вызов списка
-        # Но нужно сохранить состояние. Для простоты - просто алерт и юзер сам нажмет назад.
+        # Просто обновляем текущее сообщение с новым статусом (костыль, но работает)
+        await tmpl_edit(callback, None) 
 
 # --- Ручная рассылка ---
 
@@ -196,9 +183,16 @@ async def broadcast_tpl_start(callback: types.CallbackQuery, state: FSMContext):
         return
     
     kb = []
+    active_found = False
     for t in templates:
         if t.is_active:
             kb.append([InlineKeyboardButton(text=t.name, callback_data=f"send_tpl_{t.id}")])
+            active_found = True
+            
+    if not active_found:
+        await callback.answer("Нет активных шаблонов для отправки!", show_alert=True)
+        return
+
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_exit")])
     
     await callback.message.edit_text("Выберите шаблон для отправки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
