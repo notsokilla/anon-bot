@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     landing_url: str = "https://example.com/reveal"
     token_secret: str = "change_me"
     webhook_port: int = 8080
-    scheduled_broadcast_cron: str = ""
-    scheduled_broadcast_text: str = ""
+    scheduled_broadcast_cron: str = ""  # теперь не используется, только для обратной совместимости
+    scheduled_broadcast_text: str = ""  # теперь не используется
 
     @property
     def admin_list(self) -> list[int]:
