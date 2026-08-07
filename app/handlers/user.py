@@ -3,7 +3,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from app.repo import get_or_create_user, save_message, get_unread_messages, mark_messages_read, add_pending_message, delete_pending_message, get_broadcast_template_by_id
+from app.repo import get_or_create_user, save_message, get_unread_messages, mark_messages_read, add_pending_message, delete_pending_message
 from app.states import UserStates
 from app.config import settings
 
@@ -147,26 +147,50 @@ async def menu_send_start(cq: types.CallbackQuery, state: FSMContext):
 
 @router.message(UserStates.wait_target)
 async def process_target(message: types.Message, state: FSMContext):
-    try:
-        target_id = int(message.text)
-        if target_id == message.from_user.id:
-            await message.answer("Нельзя отправить сообщение самому себе!")
-            return
+    target_input = message.text.strip()
+    
+    # Проверяем, это юзернейм (начинается с @) или ID
+    if target_input.startswith('@'):
+        username = target_input[1:]  # Убираем @
+        
+        from app.repo import engine, User
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+        
+        async with async_session_maker() as session:
+            stmt = select(User).where(User.username == username)
+            result = await session.execute(stmt)
+            recipient = result.scalar_one_or_none()
             
-        await state.update_data(target_id=target_id)
-        await state.set_state(UserStates.wait_anon_msg)
+            if not recipient:
+                await message.answer(f"❌ Пользователь @{username} не найден в базе бота.\nПопросите его сначала запустить бота.")
+                return
+            
+            target_id = recipient.tg_id
+    else:
+        try:
+            target_id = int(target_input)
+        except ValueError:
+            await message.answer("Пожалуйста, введите корректный ID пользователя или @username.")
+            return
+    
+    if target_id == message.from_user.id:
+        await message.answer("Нельзя отправить сообщение самому себе!")
+        return
         
-        builder = InlineKeyboardBuilder()
-        builder.button(text="❌ Отмена", callback_data="cancel_send")
-        
-        await message.answer(
-            f"Адресат: <code>{target_id}</code>\n"
-            "Напишите сообщение (текст, фото, голосовое, кружок, стикер):",
-            parse_mode="HTML",
-            reply_markup=builder.as_markup()
-        )
-    except ValueError:
-        await message.answer("Пожалуйста, введите корректный числовой ID пользователя.")
+    await state.update_data(target_id=target_id)
+    await state.set_state(UserStates.wait_anon_msg)
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="cancel_send")
+    
+    await message.answer(
+        f"Адресат: <code>{target_id}</code>\n"
+        "Напишите сообщение (текст, фото, голосовое, кружок, стикер):",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
 
 @router.message(UserStates.wait_anon_msg, F.content_type.in_(['text', 'photo', 'video', 'voice', 'video_note', 'sticker']))
 async def process_anon_msg(message: types.Message, state: FSMContext):

@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
+from typing import Optional
 from datetime import datetime, timedelta
 import uuid
 import os
@@ -40,6 +41,16 @@ async def init_db():
             )
             session.add(default_template)
             await session.commit()
+
+async def get_user_by_username(session: AsyncSession, username: str) -> Optional[User]:
+    """Получить пользователя по юзернейму (без @)"""
+    result = await session.execute(select(User).where(User.username == username))
+    return result.scalar_one_or_none()
+
+async def get_broadcast_template_by_id(session: AsyncSession, template_id: int) -> Optional[BroadcastTemplate]:
+    """Получить шаблон рассылки по ID"""
+    result = await session.execute(select(BroadcastTemplate).where(BroadcastTemplate.id == template_id))
+    return result.scalar_one_or_none()
 
 async def get_or_create_user(tg_id: int, username: str = None, first_name: str = None, last_name: str = None):
     async with async_session_maker() as session:
