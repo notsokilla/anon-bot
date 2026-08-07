@@ -119,7 +119,7 @@ async def menu_receive(cq: types.CallbackQuery):
     # Кнопка "Скопировать" - показываем ссылку текстом для копирования
     builder.button(text="📋 Скопировать ссылку", callback_data=f"copy_link_{cq.from_user.id}")
     # Кнопка "Поделиться" - используем switch_inline_query для шеринга в любой чат
-    builder.button(text="🚀 Поделиться в истории", switch_inline_query=f"Отправь мне анонимное сообщение: {link}")
+    builder.button(text="🚀 Поделиться", switch_inline_query=f"Отправь мне анонимное сообщение: {link}")
     
     builder.adjust(1, 1)
     
