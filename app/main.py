@@ -31,9 +31,11 @@ async def main():
     Path("data").mkdir(exist_ok=True)
     await init_db()
 
+    # Создаём сессию (с проверкой прокси) и бота
+    session = await create_telegram_session()
     bot = Bot(
         token=settings.bot_token,
-        session=create_telegram_session(),
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
