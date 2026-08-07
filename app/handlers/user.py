@@ -3,7 +3,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from app.repo import get_or_create_user, save_message, get_unread_messages, mark_messages_read, add_pending_message, delete_pending_message
+from app.repo import get_or_create_user, save_message, get_unread_messages, mark_messages_read, add_pending_message, delete_pending_message, get_broadcast_template_by_id
 from app.states import UserStates
 from app.config import settings
 
@@ -112,22 +112,22 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "menu_receive")
 async def menu_receive(cq: types.CallbackQuery):
-    link = f"https://t.me/{(await cq.bot.get_me()).username}?start={cq.from_user.id}"
+    bot_username = (await cq.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={cq.from_user.id}"
     
     builder = InlineKeyboardBuilder()
-    # Кнопка "Поделиться" теперь работает корректно через switch_inline_query или просто текстом
-    # Telegram не позволяет программно открыть шаринг, но можно предложить скопировать
-    builder.button(text="📋 Скопировать ссылку", url=link) 
-    # Хак для "Поделиться в истории": используем специальную схему, если поддерживается, или просим юзера
-    # Самый надежный вариант: кнопка с ссылкой на самого себя с параметром start
-    builder.button(text="🚀 Поделиться в истории", url=f"tg://resolve?domain={(await cq.bot.get_me()).username}&start={cq.from_user.id}")
+    # Кнопка "Скопировать" - показываем ссылку текстом для копирования
+    builder.button(text="📋 Скопировать ссылку", callback_data=f"copy_link_{cq.from_user.id}")
+    # Кнопка "Поделиться" - используем switch_inline_query для шеринга в любой чат
+    builder.button(text="🚀 Поделиться в истории", switch_inline_query=f"Отправь мне анонимное сообщение: {link}")
     
     builder.adjust(1, 1)
     
     await cq.message.edit_text(
         f"💌 <b>Ваша персональная ссылка:</b>\n\n"
         f"<code>{link}</code>\n\n"
-        "Разместите её в профиле или сторис, чтобы получать анонимные сообщения!",
+        "Нажмите 'Скопировать ссылку' чтобы получить её для копирования\n"
+        "Или нажмите 'Поделиться в истории' чтобы поделиться ссылкой!",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -305,4 +305,31 @@ async def copy_link_handler(cq: types.CallbackQuery):
         parse_mode="HTML"
     )
     await cq.answer("Ссылка отправлена!", show_alert=False)
+
+
+# Хендлер для inline режима (когда пользователь делится ссылкой через switch_inline_query)
+@router.inline_query()
+async def inline_query_handler(inline_query: types.InlineQuery):
+    bot_username = (await inline_query.bot.get_me()).username
+    user_id = inline_query.from_user.id
+    link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    results = [
+        types.InlineQueryResultArticle(
+            id="share_link",
+            title="Отправить мне анонимное сообщение",
+            description=f"Нажми чтобы отправить анонимное сообщение!",
+            input_message_content=types.InputTextMessageContent(
+                message_text=f"📨 Отправь мне анонимное сообщение по ссылке:\n{link}",
+                parse_mode="HTML"
+            ),
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    types.InlineKeyboardButton(text="💌 Написать анонимно", url=link)
+                ]]
+            )
+        )
+    ]
+    
+    await inline_query.answer(results, cache_time=60)
 

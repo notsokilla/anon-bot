@@ -379,3 +379,18 @@ async def tmpl_save_new_text(message: types.Message, state: FSMContext):
 async def admin_logout(cq: types.CallbackQuery):
     await invalidate_admin_session(cq.from_user.id)
     await cq.message.edit_text("✅ Вы вышли из админ-панели.")
+
+# Хендлер для возврата в главное меню после выхода из админки
+@router.callback_query(F.data == "admin_main")
+async def admin_main_menu(cq: types.CallbackQuery):
+    if not await is_admin_session(cq.from_user.id):
+        return await cq.answer("Сессия истекла", show_alert=True)
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📊 Статистика", callback_data="admin_stats")
+    builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
+    builder.button(text="📋 Шаблоны", callback_data="admin_templates")
+    builder.button(text="🚪 Выйти", callback_data="admin_logout")
+    builder.adjust(2, 2, 1)
+    
+    await cq.message.edit_text("Админ-панель:", reply_markup=builder.as_markup())

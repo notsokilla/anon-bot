@@ -49,6 +49,9 @@ async def main():
     bot = Bot(token=settings.bot_token, session=aiogram_session)
     dp = Dispatcher()
     
+    # Включаем inline режим для бота
+    await bot.set_my_commands([])  # Очищаем команды для inline режима если нужно
+    
     dp.include_router(user.router)
     dp.include_router(admin.router)
     
